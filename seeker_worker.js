@@ -1,12 +1,13 @@
-// seeker_worker.js
+// seeker_worker.js (with WASM fallback)
 
-// --- Data will be received from the main thread ---
-let gachaMaster;
-let itemMaster;
-let itemNameMap;
+// --- Global Data ---
+let gachaMaster; // gachaMasterには渡されたgachaDataを格納
+let itemMaster; // advanceOneStep_jsでは使用しないため、空で保持
+let itemNameMap; // targetSequenceを扱うために必要
+let wasmExports = null;
 
-// --- Common functions ---
-function xorshift32(seed) {
+// --- Standalone JS Simulation Logic ---
+function xorshift32_js(seed) {
     let x = seed;
     x ^= x << 13;
     x ^= x >>> 17;
@@ -14,236 +15,156 @@ function xorshift32(seed) {
     return x >>> 0;
 }
 
-// --- Gacha Simulator with Caching ---
-class GachaSimulator {
-    constructor(startSeed, gacha) {
-        this.startSeed = startSeed;
-        this.gacha = gacha;
-        this.canReRollRarity1 = gacha.rarityItems[1] && gacha.rarityItems[1].length >= 2;
-        
-        // FIFO cache for up to 60 simulation steps
-        this.resultsCache = new Array(60); 
-        this.lastCalculatedStep = -1;
+function advanceOneStep_js(currentSeed, lastItemId, gacha) {
+    const s1 = xorshift32_js(currentSeed);
+    if ((s1 % 10000) < gacha.featuredItemRate) {
+        return { isFeatured: true, drawnItemId: -1, endSeed: s1, lastItemId: -1 };
     }
-
-    getStep(k) {
-        if (k < 0) return { endSeed: this.startSeed, lastItemId: -1 };
-        if (this.lastCalculatedStep >= k && this.resultsCache[k]) {
-            return this.resultsCache[k];
+    const s2 = xorshift32_js(s1);
+    const rarityVal = s2 % 10000;
+    let rarityId = 0;
+    // 【修正】gachaオブジェクトにcumulativeRarityRatesが事前計算されている前提
+    const cumulativeRates = gacha.cumulativeRarityRates;
+    for (let i = 0; i < cumulativeRates.length; i++) {
+        if (rarityVal < cumulativeRates[i]) {
+            rarityId = i;
+            break;
         }
-
-        // Calculate steps from the last known point
-        for (let i = this.lastCalculatedStep + 1; i <= k; i++) {
-            const prevState = (i === 0) ? { endSeed: this.startSeed, lastItemId: -1 } : this.resultsCache[i - 1];
-            this.resultsCache[i] = this.advanceOneStep(prevState.endSeed, prevState.lastItemId);
-        }
-        
-        this.lastCalculatedStep = k;
-        return this.resultsCache[k];
     }
-
-    advanceOneStep(currentSeed, lastItemId) {
-        const s1 = xorshift32(currentSeed);
-        const isFeaturedDraw = (s1 % 10000) < this.gacha.featuredItemRate;
-
-        if (isFeaturedDraw) {
-            return {
-                rarityId: -1, // No rarity for featured
-                drawnItemId: -1, // No specific item for featured
-                isFeatured: true,
-                endSeed: s1,
-                lastItemId: -1 // Reset re-roll chain
-            };
-        }
-
-        const s2 = xorshift32(s1);
-        const rarityVal = s2 % 10000;
-        
-        // --- OPTIMIZED RARITY LOOKUP ---
-        let rarityId = 0;
-        const cumulativeRates = this.gacha.cumulativeRarityRates;
-        for (let i = 0; i < cumulativeRates.length; i++) {
-            if (rarityVal < cumulativeRates[i]) {
-                rarityId = i;
-                break;
+    const s3 = xorshift32_js(s2);
+    // 【修正】gachaオブジェクトにrarityItemsが事前計算されている前提
+    const itemPool = gacha.rarityItems[rarityId]; 
+    if (!itemPool || itemPool.length === 0) {
+        return { isFeatured: false, drawnItemId: -2, endSeed: s3, lastItemId };
+    }
+    let drawnItemId = itemPool[s3 % itemPool.length];
+    
+    // レア被り判定 (レアリティ1のみ)
+    // 【修正】itemPoolの長さを参照する
+    const canReRollRarity1 = gacha.rarityItems[1] && gacha.rarityItems[1].length >= 2;
+    if (canReRollRarity1 && rarityId === 1 && lastItemId === drawnItemId) {
+        const s4 = xorshift32_js(s3);
+        const reRollIndex = s4 % (itemPool.length - 1);
+        let newDrawnItemId = -1;
+        let nonMatchingCounter = 0;
+        for (const itemId of itemPool) {
+            if (itemId !== drawnItemId) {
+                if (nonMatchingCounter === reRollIndex) {
+                    newDrawnItemId = itemId;
+                    break;
+                }
+                nonMatchingCounter++;
             }
         }
-        // --- END OPTIMIZATION ---
-
-        const s3 = xorshift32(s2);
-        const itemPool = this.gacha.rarityItems[rarityId];
-        if (!itemPool || itemPool.length === 0) {
-            return { rarityId, drawnItemId: -2, isFeatured: false, endSeed: s3, lastItemId }; // -2 for error
-        }
-        let drawnItemId = itemPool[s3 % itemPool.length];
-
-        const isReRoll = this.canReRollRarity1 && rarityId === 1 && lastItemId === drawnItemId;
-
-        if (isReRoll) {
-            const s4 = xorshift32(s3);
-            const reRollPool = itemPool.filter(id => id !== drawnItemId);
-            if (reRollPool.length === 0) {
-                return { rarityId, drawnItemId: -2, isFeatured: false, endSeed: s4, lastItemId };
-            }
-            drawnItemId = reRollPool[s4 % reRollPool.length];
-            return { rarityId, drawnItemId, isFeatured: false, endSeed: s4, lastItemId: drawnItemId };
-        } else {
-            return { rarityId, drawnItemId, isFeatured: false, endSeed: s3, lastItemId: drawnItemId };
-        }
+        drawnItemId = (newDrawnItemId !== -1) ? newDrawnItemId : drawnItemId;
+        return { isFeatured: false, drawnItemId, endSeed: s4, lastItemId: drawnItemId };
     }
+    return { isFeatured: false, drawnItemId, endSeed: s3, lastItemId: drawnItemId };
 }
 
-
-// --- Main search logic ---
-function performSearch(startSeed, count, gachaId, targetSequence, isFullSearch, isCounterSearch, stopOnFound) {
-    const gacha = gachaMaster[gachaId];
-    if (!gacha) return;
-
-    const progressUpdateInterval = 10000;
+function performSearch_js(startSeed, count, gacha, targetSequence, isCounterSearch, stopOnFound, nextJob) {
     let currentSeedToTest = startSeed;
     let processedCount = 0;
-    const initialSeed = startSeed; // xorshift32順のループ検出用
-
+    const initialSeed = startSeed;
+    
+    // 【修正】targetSequenceはID(数値)または特殊コード(-1, -2)で渡されるため、itemNameMapはここでは不要
+    
     for (let i = 0; i < count; i++) {
+        // カウンタ検索の場合は43億を超えたら終了
+        if (isCounterSearch && currentSeedToTest > 4294967295) break; 
         
-        if (currentSeedToTest === 0) {
-            // シードが0になったら強制停止（xorshift32は0を受け取ると0を返すため、シード0は不可）
-            break;
-        }
-        
-        // xorshift32順（部分検索およびSEED指定全件検索時）の場合の周期完了チェック
-        if (!isCounterSearch && processedCount > 0 && currentSeedToTest === initialSeed) {
-            break;
-        }
-        
-        // カウンタ順（全件検索時）の場合の終了チェック
-        // currentSeedToTestが4294967296 (0) になったら終了（4294967295の次が0）
-        if (isCounterSearch && currentSeedToTest > 4294967295) { 
-            break;
-        }
+        // xorshift32検索の場合は一周したら終了
+        if (!isCounterSearch && processedCount > 0 && currentSeedToTest === initialSeed) break;
 
         processedCount++;
 
-        const simulator = new GachaSimulator(currentSeedToTest, gacha);
-
-        // --- Full Sequence Check ---
         let fullSequenceMatched = true;
+        let simSeed = currentSeedToTest;
+        let simLastItemId = -1;
         for (let k = 0; k < targetSequence.length; k++) {
-            const targetItemName = targetSequence[k];
-            const stepResult = simulator.getStep(k); 
-
+            const targetCode = targetSequence[k]; // ID or 特殊コード(-1:目玉, -2:目玉(確定))
+            const stepResult = advanceOneStep_js(simSeed, simLastItemId, gacha);
             let currentStepMatched = false;
-            if (targetItemName === '目玉(確定)') {
-                currentStepMatched = true; 
-            } else if (targetItemName === '目玉') {
-                currentStepMatched = stepResult.isFeatured;
-            } else {
-                const targetItemId = itemNameMap[targetItemName];
-                currentStepMatched = !stepResult.isFeatured && stepResult.drawnItemId === targetItemId;
-            }
+            
+            // targetCode が数値コードで渡されるため、判定ロジックを修正
+            const FEAT_CODE = -1; // index.htmlと合わせる
+            const G_FEAT_CODE = -2; // index.htmlと合わせる
 
+            if (targetCode === G_FEAT_CODE) currentStepMatched = true; // 目玉(確定)は常にTrue
+            else if (targetCode === FEAT_CODE) currentStepMatched = stepResult.isFeatured; // 目玉
+            else {
+                currentStepMatched = !stepResult.isFeatured && stepResult.drawnItemId === targetCode; // 通常アイテムはIDを比較
+            }
+            
             if (!currentStepMatched) {
                 fullSequenceMatched = false;
                 break;
             }
+            simSeed = stepResult.endSeed;
+            simLastItemId = stepResult.lastItemId;
         }
 
         if (fullSequenceMatched) {
-            // SEED発見
             postMessage({ type: 'found', seed: currentSeedToTest });
-
             if (stopOnFound) {
-                // 停止する場合
-                const processedSinceLastUpdate = processedCount % progressUpdateInterval;
-                if (processedSinceLastUpdate > 0) {
-                     postMessage({ type: 'progress', processed: processedSinceLastUpdate });
-                }
-                postMessage({ type: 'stop_found', finalSeed: currentSeedToTest, processed: processedSinceLastUpdate }); 
-                return; // ワーカーを即時終了
+                const processedSinceLastUpdate = processedCount % 100000;
+                if (processedSinceLastUpdate > 0) postMessage({ type: 'progress', processed: processedSinceLastUpdate });
+                // finalSeedは不要
+                postMessage({ type: 'stop_found', processed: processedCount }); 
+                return;
             }
         }
-
-        if (processedCount % progressUpdateInterval === 0) {
-            postMessage({ type: 'progress', processed: progressUpdateInterval });
+        if (processedCount % 100000 === 0) {
+            postMessage({ type: 'progress', processed: 100000 });
         }
         
-        // 次のSEEDへの遷移ロジック
         if (isCounterSearch) {
-            // カウンタ順: 1ずつ増加 (32bit unsignedでオーバーフローをシミュレート)
-            currentSeedToTest = (currentSeedToTest + 1) >>> 0;
-            // 0になった場合、次のループでbreakする
-            if (currentSeedToTest === 0) currentSeedToTest = 4294967296; // 終了フラグとして使用
+            currentSeedToTest = (currentSeedToTest + 1) >>> 0; 
+            if (currentSeedToTest === 0) currentSeedToTest = 4294967296; // 43億の次のシードを表現
         } else {
-            // xorshift32順
-            currentSeedToTest = xorshift32(currentSeedToTest);
+            currentSeedToTest = xorshift32_js(currentSeedToTest);
         }
+        
     }
+    const remainingProgress = processedCount % 100000;
+    if (remainingProgress > 0) postMessage({ type: 'progress', processed: remainingProgress });
+    
+    // nextJobがある場合は、カウンタ検索に移行
+    if (nextJob) {
+        performSearch_js(nextJob.initialStartSeed, nextJob.count, gacha, nextJob.targetSequence, nextJob.isCounterSearch, stopOnFound, null);
+    } else {
+        // finalSeedは不要
+        postMessage({ type: 'done', processed: processedCount });
+    }
+}
 
-    // ループが最後まで完了した場合 (SEEDが見つからなかった場合)
-    const remainingProgress = processedCount % progressUpdateInterval;
-    if (remainingProgress > 0) {
-        postMessage({ type: 'progress', processed: remainingProgress });
-    }
-    // 最後に処理したSEEDを finalSeed として報告
-    postMessage({ type: 'done', finalSeed: currentSeedToTest }); 
+function performSearch_wasm(startSeed, count, gacha, targetSequence, isCounterSearch, stopOnFound, nextJob) {
+    // WASMが複雑なジョブチェーンに対応しないため、JS版にフォールバック
+    performSearch_js(startSeed, count, gacha, targetSequence, isCounterSearch, stopOnFound, nextJob);
 }
 
 
-self.onmessage = function(e) {
+// --- Main Message Handler ---
+self.onmessage = async function(e) {
+    const wasmLoaded = false; 
+    
     const {
-        initialStartSeed,
-        workerIndex,
-        rangePerWorker,
-        count,
-        gachaId,
-        targetSequence,
-        gachaMasterData,
-        itemMasterData,
-        isFullSearch, 
-        isCounterSearch,
-        stopOnFound
+        initialStartSeed, workerIndex, rangePerWorker, count, gachaId,
+        targetSequence, gachaData, isCounterSearch, stopOnFound, nextJob 
     } = e.data;
 
-    // Set up master data for this worker instance
-    gachaMaster = gachaMasterData;
-    itemMaster = itemMasterData;
-    itemNameMap = Object.fromEntries(Object.entries(itemMaster).map(([id, { name }]) => [name, parseInt(id, 10)]));
+    // --- データ初期化（全てのジョブで共通） ---
+    // メインスレッドから渡された事前計算済みデータを使用
+    gachaMaster = { [gachaId]: gachaData }; // gachaMaster[gachaId]で参照できるようにラップ
+    // ----------------------------------------
     
-    // Pre-process gacha data
-    for (const id in gachaMaster) {
-        const gacha = gachaMaster[id];
-
-        // Pre-calculate cumulative rarity rates
-        if (gacha.rarityRates && !gacha.cumulativeRarityRates) {
-            let cumulativeRate = 0;
-            const cumulativeArray = [];
-            // Assuming rarities are '0', '1', '2', '3', '4' in order
-            for (let i = 0; i <= 4; i++) {
-                cumulativeRate += gacha.rarityRates[i.toString()] || 0;
-                cumulativeArray.push(cumulativeRate);
-            }
-            gacha.cumulativeRarityRates = cumulativeArray;
-        }
-
-        if (!gacha.rarityItems) {
-            const rarityItems = { '0': [], '1': [], '2': [], '3': [], '4': [] };
-            gacha.pool.forEach(itemId => {
-                const item = itemMaster[itemId];
-                if (item) rarityItems[item.rarity].push(itemId);
-            });
-            gacha.rarityItems = rarityItems;
-        }
-    }
-
     let actualStartSeed = initialStartSeed;
-    if (isCounterSearch) {
-        actualStartSeed = (initialStartSeed + (workerIndex * rangePerWorker)) >>> 0;
-    } else {
-        const offset = workerIndex * rangePerWorker;
-        for (let i = 0; i < offset; i++) {
-            actualStartSeed = xorshift32(actualStartSeed);
-        }
-    }
 
-    performSearch(actualStartSeed, count, gachaId, targetSequence, isFullSearch, isCounterSearch, stopOnFound);
+
+    if (wasmLoaded) {
+        performSearch_wasm(actualStartSeed, count, gachaMaster[gachaId], targetSequence, isCounterSearch, stopOnFound, nextJob);
+    } else {
+        // gachaMaster[gachaId] には累積確率、アイテムプールが計算済みのオブジェクトが格納されている
+        performSearch_js(actualStartSeed, count, gachaMaster[gachaId], targetSequence, isCounterSearch, stopOnFound, nextJob);
+    }
 };
