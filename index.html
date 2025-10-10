@@ -2,68 +2,76 @@
 <html>
 <head>
     <meta charset="utf-8">
-    <title>Rust WebAssembly 計算例</title>
+    <title>Rust WebAssembly Xorshift32 ベンチマーク</title>
 </head>
 <body>
     <h1>Rust WebAssembly での計算例</h1>
     <p>結果はブラウザのコンソールに出力されます。開発者ツール（F12）でご確認ください。</p>
 
-<script type="module">
-    // 💡 必要な関数をすべて一つの import 文にまとめる
-    import init, { xorshift32, generate_xorshift32_bulk } from './wasm_adder.js'; 
+    <script type="module">
+        // 必要な関数をすべて一つの import 文にまとめる
+        import init, { xorshift32, generate_xorshift32_bulk, add } from './wasm_adder.js'; 
 
-    // JS側の状態（シード値）
-    let js_seed = 2463534242; 
+        // JS側の状態（シード値）
+        let js_seed = 2463534242; 
 
-    /**
-     * Xorshift32 の JavaScript 実装
-     */
-    function jsXorshift32() {
-        let x = js_seed;
-        x ^= x << 13;
-        x ^= x >> 17;
-        x ^= x << 5;
-        js_seed = x;
-        return x >>> 0;
-    }
-
-    async function runWasm() {
-        try {
-            await init();
-
-            const ITERATIONS = 10_000_000;
-            
-            console.log(`\n--- Wasm/JS 一括乱数生成ベンチマーク (${ITERATIONS.toLocaleString()}回) ---`);
-
-            // --- A. Wasm版の計測 (一括処理) ---
-            console.time('Wasm Bulk Time');
-            const wasm_results = generate_xorshift32_bulk(ITERATIONS); 
-            console.timeEnd('Wasm Bulk Time');
-            console.log(`Wasm生成配列サイズ: ${wasm_results.length.toLocaleString()}`); 
-
-            // --- B. JS版の計測 (配列処理) ---
-            // Wasmから返された最終シードをJSのシードにセット（公平性の確保）
-            js_seed = wasm_results[wasm_results.length - 1]; 
-            
-            console.time('JavaScript Bulk Time');
-            // 配列操作のコストを公平にするため、JSも配列にpushする
-            const js_results = [];
-            for (let i = 0; i < ITERATIONS; i++) {
-                js_results.push(jsXorshift32());
-            }
-            console.timeEnd('JavaScript Bulk Time');
-            console.log(`JS生成配列サイズ: ${js_results.length.toLocaleString()}`);
-
-            // 最終結果の確認
-            console.log(`\nベンチマーク完了。WasmがJSより高速なはずです。`);
-
-
-        } catch (error) {
-            console.error("WebAssemblyの実行中にエラーが発生しました:", error);
+        /**
+         * Xorshift32 の JavaScript 実装
+         */
+        function jsXorshift32() {
+            let x = js_seed;
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+            js_seed = x;
+            return x >>> 0;
         }
-    }
 
-    runWasm();
-</script>
+        async function runWasm() {
+            try {
+                // Wasmモジュールのロードと初期化
+                await init();
+
+                // 実行回数を定義 (1000万回)
+                const ITERATIONS = 10_000_000;
+                
+                // --- 旧 add 関数の確認（動作確認用） ---
+                const add_result = add(10, 5);
+                console.log(`Rust Wasmでの計算 (add): 10 + 5 = ${add_result}`);
+
+
+                // --- Wasm/JS 一括乱数生成ベンチマーク ---
+                console.log(`\n--- Wasm/JS 一括乱数生成ベンチマーク (${ITERATIONS.toLocaleString()}回) ---`);
+
+                // A. Wasm版の計測 (一括処理)
+                console.time('Wasm Bulk Time');
+                // 1000万回の処理を一度の関数呼び出しで実行
+                const wasm_results = generate_xorshift32_bulk(ITERATIONS); 
+                console.timeEnd('Wasm Bulk Time');
+                console.log(`Wasm生成配列サイズ: ${wasm_results.length.toLocaleString()}`);
+
+                // B. JS版の計測 (配列処理)
+                // Wasmから返された最終シードをJSのシードにセット（公平性の確保）
+                js_seed = wasm_results[wasm_results.length - 1]; 
+                
+                console.time('JavaScript Bulk Time');
+                // 配列操作のコストを公平にするため、JSも配列にpushする
+                const js_results = [];
+                for (let i = 0; i < ITERATIONS; i++) {
+                    js_results.push(jsXorshift32());
+                }
+                console.timeEnd('JavaScript Bulk Time');
+                console.log(`JS生成配列サイズ: ${js_results.length.toLocaleString()}`);
+
+                console.log(`\nベンチマーク完了。結果を比較してください。`);
+
+
+            } catch (error) {
+                console.error("WebAssemblyの実行中にエラーが発生しました:", error);
+            }
+        }
+
+        runWasm();
+    </script>
 </body>
 </html>
