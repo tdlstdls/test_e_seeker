@@ -10,6 +10,14 @@ export function add(a, b) {
     return ret;
 }
 
+/**
+ * @returns {number}
+ */
+export function xorshift32() {
+    const ret = wasm.xorshift32();
+    return ret >>> 0;
+}
+
 let cachedUint32ArrayMemory0 = null;
 
 function getUint32ArrayMemory0() {
