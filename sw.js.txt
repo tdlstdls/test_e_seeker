@@ -1,0 +1,40 @@
+// sw.js
+
+// インストールイベント: Service Workerのキャッシュを管理
+self.addEventListener('install', (event) => {
+  console.log('Service Worker: Installed');
+  // Service Workerがすぐにアクティブ化されるようにする
+  self.skipWaiting(); 
+});
+
+// フェッチイベント: リクエストの応答にCOOP/COEPヘッダーを付与する
+self.addEventListener('fetch', (event) => {
+  // すべてのリソース（HTML、JS、CSS、Workerなど）の応答を処理
+  event.respondWith(
+    (async () => {
+      // 1. 通常通りリクエストをフェッチ
+      const response = await fetch(event.request);
+      
+      // 2. 応答が取得できなかったり、不透明な応答 (opaque response) の場合はそのまま返す
+      if (!response || response.status !== 200 || response.type !== 'basic') {
+        return response;
+      }
+
+      // 3. 応答のヘッダーをコピーし、新しいヘッダーを設定
+      const newHeaders = new Headers(response.headers);
+      
+      // 💡 必須ヘッダー: Cross-Origin Isolationを有効化
+      newHeaders.set('Cross-Origin-Opener-Policy', 'same-origin');
+      newHeaders.set('Cross-Origin-Embedder-Policy', 'require-corp');
+
+      // 4. 新しい応答オブジェクトを作成して返す
+      const newResponse = new Response(response.body, {
+        status: response.status,
+        statusText: response.statusText,
+        headers: newHeaders,
+      });
+
+      return newResponse;
+    })()
+  );
+});
