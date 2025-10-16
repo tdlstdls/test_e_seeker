@@ -1,8 +1,11 @@
-// seeker_worker.js (標準Web Worker)
+// seeker_worker.js (SAB版)
 
 // --- Global Data (Worker Scope) ---
 let gachaData;
-let itemMaster;
+let seekerConfig;
+let resultView; // Uint32Array view
+let progressView; // Uint32Array view
+let stopView; // Uint32Array view
 
 // --- Utility Functions ---
 
@@ -20,7 +23,7 @@ function xorshift32(seed) {
 /**
  * 1回分のガチャシミュレーションを実行
  */
-function advanceOneStep(currentSeed) { // lastItemIdは、このシンプルなロジックでは未使用
+function advanceOneStep(currentSeed) { 
     const gacha = gachaData;
     
     // 1. シード更新 (S1)
@@ -34,7 +37,7 @@ function advanceOneStep(currentSeed) { // lastItemIdは、このシンプルな�
     // 3. レアリティ判定 (S2)
     const s2 = xorshift32(s1);
     const rarityVal = s2 % 10000;
-    let rarityId = -1; // 0, 1, 2, 3, 4のいずれか
+    let rarityId = -1;
     
     // 累積排出率をチェック
     for (let i = 0; i < gacha.cumulativeRarityRates.length; i++) {
@@ -45,16 +48,13 @@ function advanceOneStep(currentSeed) { // lastItemIdは、このシンプルな�
     }
     
     // 4. アイテム排出 (S3)
-    // 検索ロジック修正: rarityIdが有効かチェック
     if (rarityId === -1) {
-        // 累積確率の計算に問題がある場合に備えて、シードを進める
         const s3 = xorshift32(s2);
         return { drawnItemId: 999, endSeed: s3 }; 
     }
     
     const itemPool = gacha.rarityItems[rarityId.toString()]; 
     if (!itemPool || itemPool.length === 0) {
-        // プールが空の場合もシードを進める
         const s3 = xorshift32(s2);
         return { drawnItemId: 999, endSeed: s3 }; 
     }
@@ -77,21 +77,26 @@ function performSearch_js(startSeed, count, targetSequence, stopOnFound, workerI
 
     // 検索処理
     for (let i = 0; i < count; i++) {
+        
+        // 停止フラグチェック（高速化のため5万回に1回）
+        if (i % 50000 === 0 && stopView[seekerConfig.SAB_STOP_FLAG] === 1) {
+            break; 
+        }
 
         let tempSeed = currentSeedToTest;
-        let lastItemId = 0; // ガチャシミュレーションの内部変数としてのみ使用
+        let lastItemId = 0; 
         let matchMask = 0;
         let isMatch = true;
         
         // ターゲットシーケンスの長さ分、ガチャをシミュレーション
         for (let j = 0; j < seqLength; j++) {
-            const result = advanceOneStep(tempSeed); // lastItemIdを渡さない（シンプルなシミュレーションのため）
+            const result = advanceOneStep(tempSeed);
             tempSeed = result.endSeed; 
             
             const targetId = targetSequence[j];
             const drawnId = result.drawnItemId;
             
-            // 目玉アイテム (-1) または特定のアイテムIDに一致するか
+            // ターゲットIDと排出IDが一致するかを判定
             if (targetId === drawnId) {
                 matchMask |= (1 << j);
             } else {
@@ -100,21 +105,33 @@ function performSearch_js(startSeed, count, targetSequence, stopOnFound, workerI
             }
         }
         
+        // 全てのターゲットが連続して一致した場合
         if (isMatch) {
-            // 結果をメインスレッドに報告
-            postMessage({ type: 'result', seed: currentSeedToTest, mask: matchMask, workerIndex });
+            // 結果をSABに書き込む
+            const currentResults = Atomics.load(resultView, seekerConfig.SAB_RESULT_COUNT);
             
-            if (stopOnFound) {
-                postMessage({ type: 'done', processed: processedCount, workerIndex });
-                return; 
+            if (currentResults < 5000) { // MAX_RESULTS制限
+                const writeOffset = 1 + (currentResults * 2);
+                
+                Atomics.store(resultView, writeOffset, currentSeedToTest); // SEED
+                Atomics.store(resultView, writeOffset + 1, matchMask); // マスク
+                
+                // 結果カウントをアトミックにインクリメント
+                Atomics.add(resultView, seekerConfig.SAB_RESULT_COUNT, 1);
+                
+                if (stopOnFound) {
+                    // 停止フラグをセット
+                    Atomics.store(stopView, seekerConfig.SAB_STOP_FLAG, 1);
+                    break;
+                }
             }
         }
 
         processedCount++;
 
-        // 進捗報告（50万件ごとにメインスレッドへ報告）
+        // 進捗報告（50万件ごとにSABを更新）
         if (processedCount % 500000 === 0) {
-            postMessage({ type: 'progress', processed: 500000, workerIndex });
+            Atomics.add(progressView, seekerConfig.SAB_PROGRESS_PROCESSED, 500000);
         }
 
         currentSeedToTest = (currentSeedToTest + 1) >>> 0;
@@ -123,41 +140,53 @@ function performSearch_js(startSeed, count, targetSequence, stopOnFound, workerI
     // 残りの進捗を報告
     const remainingProgress = processedCount % 500000;
     if (remainingProgress > 0) {
-         postMessage({ type: 'progress', processed: remainingProgress, workerIndex });
+         Atomics.add(progressView, seekerConfig.SAB_PROGRESS_PROCESSED, remainingProgress);
     }
     
-    // 完了メッセージ
-    postMessage({ type: 'done', processed: processedCount, workerIndex });
+    // 完了メッセージ（メインスレッドにWorkerが終了したことを通知）
+    postMessage({ type: 'done', workerIndex });
 }
 
 /**
- * 渡された生データからガチャ計算に必要な累積排出率とプール情報を構築
+ * SABからマスターデータをアンパックし、WorkerローカルのgachaData構造を構築
  */
-function setupGachaData(rawGacha, rawItemMaster) {
+function setupGachaDataFromSab(masterDataSab, config) {
+    const masterView = new Uint32Array(masterDataSab);
+    const gacha = {};
+
+    // 1. Gacha情報 (Featured Item Rate & Cumulative Rarity Rates)
+    const gachaStart = config.MASTER_H_GACHA_START_OFFSET;
+    gacha.featuredItemRate = masterView[gachaStart + 0];
+    gacha.cumulativeRarityRates = [];
     
-    // 1. 累積排出率の計算
-    const cumulativeRates = [];
-    let cumulativeSum = 0;
-    // レアリティは0から4までの5種類を想定
-    for (let i = 0; i <= 4; i++) {
-        cumulativeSum += rawGacha.rarityRates[i.toString()] || 0;
-        cumulativeRates.push(cumulativeSum); 
+    // Cumulative rates (R0, R1, R2, R3, R4)
+    for(let i = 1; i <= 5; i++) {
+        gacha.cumulativeRarityRates.push(masterView[gachaStart + i]);
     }
     
-    // 2. アイテムをレアリティプールに分類
-    const rarityItems = { '0': [], '1': [], '2': [], '3': [], '4': [] };
-    rawGacha.pool.forEach(itemId => {
-        const itemInfo = rawItemMaster[itemId.toString()]; // itemMasterのキーは文字列
-        if (itemInfo && itemInfo.rarity !== undefined && itemInfo.rarity >= 0 && itemInfo.rarity <= 4) {
-            rarityItems[itemInfo.rarity.toString()].push(itemId);
-        }
-    });
+    // 2. レアリティプール情報 (Rarity Items)
+    gacha.rarityItems = {};
+    const rarityPoolStartPtr = config.MASTER_H_RARITY_POOL_START;
 
-    return {
-        featuredItemRate: rawGacha.featuredItemRate,
-        cumulativeRarityRates: cumulativeRates,
-        rarityItems: rarityItems
-    };
+    // 5つのレアリティプールを読み込む
+    for (let i = 0; i < 5; i++) {
+        const metadataPtr = rarityPoolStartPtr + (i * 3);
+        const rarityId = masterView[metadataPtr];
+        const length = masterView[metadataPtr + 1];
+        const offset = masterView[metadataPtr + 2];
+        
+        if (length > 0) {
+            const itemPool = [];
+            for(let k = 0; k < length; k++) {
+                itemPool.push(masterView[offset + k]);
+            }
+            gacha.rarityItems[rarityId.toString()] = itemPool;
+        } else {
+             gacha.rarityItems[rarityId.toString()] = [];
+        }
+    }
+    
+    return gacha;
 }
 
 
@@ -168,23 +197,26 @@ self.onmessage = function(e) {
         
         if (data.type === 'search') {
             
-            const {
-                initialStartSeed, count, targetSequence, 
-                stopOnFound, workerIndex, gachaData: rawGacha, itemMaster: rawItemMaster
-            } = data;
+            // SABのビューを初期化 (グローバル変数に格納)
+            seekerConfig = data.seekerConfig;
+            resultView = new Uint32Array(data.resultSab);
+            progressView = new Uint32Array(data.progressSab);
+            stopView = new Uint32Array(data.stopSab);
+
+            // マスターデータをアンパック
+            gachaData = setupGachaDataFromSab(data.masterDataSab, seekerConfig);
             
-            itemMaster = rawItemMaster;
-            gachaData = setupGachaData(rawGacha, rawItemMaster);
-            
+            // 検索開始
             performSearch_js(
-                initialStartSeed, 
-                count, 
-                targetSequence, 
-                stopOnFound, 
-                workerIndex
+                data.initialStartSeed, 
+                data.count, 
+                data.targetSequence, 
+                data.stopOnFound, 
+                data.workerIndex
             );
         }
     } catch (error) {
+        // 処理中に予期せぬエラーが発生した場合、メインスレッドに報告してWorkerを終了させる
         console.error(`Worker ${e.data.workerIndex || 'Unknown'}で致命的なエラー:`, error);
         postMessage({ 
             type: 'error', 
