@@ -265,6 +265,24 @@
 </div>
 
 <script>
+    if ('serviceWorker' in navigator) {
+        // Service Workerを登録
+        navigator.serviceWorker.register('./sw.js')
+            .then(registration => {
+                console.log('Service Worker 登録成功:', registration);
+            })
+            .catch(error => {
+                console.error('Service Worker 登録失敗:', error);
+                // 失敗した場合はSABが使えない旨を警告
+                document.getElementById('sab-warning').style.display = 'block';
+            });
+    } else {
+        // Service Workerがサポートされていない場合の警告
+        document.getElementById('sab-warning').style.display = 'block';
+    }
+</script>
+
+<script>
     // --- 既存のマスタデータ ---
     const gachaMaster = {
         '42': {
@@ -920,3 +938,4 @@
 </script>
 </body>
 </html>
+
