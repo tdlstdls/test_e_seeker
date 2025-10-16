@@ -1,77 +1,809 @@
 <!DOCTYPE html>
-<html>
+<html lang="ja">
 <head>
-    <meta charset="utf-8">
-    <title>Rust WebAssembly Xorshift32 ベンチマーク</title>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>イベントガチャ SEEDシーカー (標準版)</title>
+    <style>
+        /* (CSSスタイルは省略せずに維持) */
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            line-height: 1.4;
+            padding: 10px;
+            max-width: 900px;
+            margin: 0 auto;
+            background-color: #f4f7f9;
+            color: #333;
+            font-size: 14px;
+        }
+        .container {
+            background: #fff;
+            padding: 15px;
+            border-radius: 12px;
+            box-shadow: 0 6px 15px rgba(0, 0, 0, 0.1);
+        }
+        h1 {
+            color: #004085;
+            font-size: 1.2rem;
+            border-bottom: 1px solid #e9ecef;
+            padding-bottom: 5px;
+            margin-top: 0;
+            text-align: center;
+        }
+        .controls, .sequence-inputs, .results-container {
+            margin-bottom: 20px;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 8px;
+            background-color: #fafafa;
+        }
+        .controls label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: bold;
+            color: #555;
+        }
+        .controls input[type="text"], .controls select {
+            width: calc(100% - 10px);
+            padding: 8px;
+            margin-bottom: 10px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            box-sizing: border-box;
+        }
+        .controls button {
+            padding: 10px 15px;
+            background-color: #007bff;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+            transition: background-color 0.2s;
+            width: 100%;
+        }
+        .controls button:hover {
+            background-color: #0056b3;
+        }
+        .controls button:disabled {
+            background-color: #ccc;
+            cursor: not-allowed;
+        }
+        .sequence-table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        .sequence-table th, .sequence-table td {
+            border: 1px solid #eee;
+            padding: 8px;
+            text-align: left;
+        }
+        .sequence-table th {
+            background-color: #e9ecef;
+            font-size: 0.9rem;
+            width: 10%;
+        }
+        .sequence-table td select, .sequence-table td input[type="radio"] {
+            margin: 0;
+        }
+        .sequence-table select {
+            width: 100%;
+        }
+        .sequence-table .selected-row {
+            background-color: #e6f7ff;
+        }
+        .results-container h2 {
+            font-size: 1.1rem;
+            color: #004085;
+            border-bottom: 1px dashed #ccc;
+            padding-bottom: 5px;
+        }
+        .progress-bar-container {
+            background-color: #e9ecef;
+            border-radius: 5px;
+            overflow: hidden;
+            margin-top: 10px;
+        }
+        .progress-bar {
+            height: 20px;
+            background-color: #28a745;
+            width: 0%;
+            text-align: center;
+            line-height: 20px;
+            color: white;
+            font-weight: bold;
+            transition: width 0.3s ease;
+        }
+        .results-list {
+            list-style: none;
+            padding: 0;
+            max-height: 300px;
+            overflow-y: auto;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            margin-top: 10px;
+        }
+        .results-list li {
+            padding: 8px 10px;
+            border-bottom: 1px solid #eee;
+            background-color: #fff;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .results-list li:last-child {
+            border-bottom: none;
+        }
+        .result-seed {
+            font-weight: bold;
+            color: #d9534f;
+            font-family: monospace;
+        }
+        .result-sequence {
+            flex-grow: 1;
+            margin-left: 10px;
+            font-size: 0.9rem;
+        }
+        .result-time {
+            color: #777;
+            font-size: 0.8rem;
+        }
+        #result-count {
+            font-weight: bold;
+            color: #28a745;
+        }
+        .warning {
+            color: #856404;
+            background-color: #fff3cd;
+            border-color: #ffeeba;
+            padding: 10px;
+            margin-bottom: 15px;
+            border: 1px solid transparent;
+            border-radius: 4px;
+        }
+        .input-method-toggle {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 15px;
+        }
+        .input-method-toggle label {
+            font-weight: normal;
+        }
+        /* ラジオボタンモードの調整 */
+        .radio-option-container {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 5px 10px;
+            max-height: 100px; /* 縦幅を制限してスクロール */
+            overflow-y: auto;
+            border: 1px solid #eee;
+            padding: 5px;
+        }
+        .radio-option-container label {
+            display: flex;
+            align-items: center;
+            font-weight: normal;
+            font-size: 0.9em;
+            cursor: pointer;
+        }
+        .radio-option-container input[type="radio"] {
+            margin-right: 5px;
+        }
+    </style>
 </head>
 <body>
-    <h1>Rust WebAssembly での計算例</h1>
-    <p>結果はブラウザのコンソールに出力されます。開発者ツール（F12）でご確認ください。</p>
 
-    <script type="module">
-        // 必要な関数をすべて一つの import 文にまとめる
-        import init, { xorshift32, generate_xorshift32_bulk, add } from './wasm_adder.js'; 
+<div class="container">
+    <h1>イベントガチャ SEEDシーカー (標準版)</h1>
 
-        // JS側の状態（シード値）
-        let js_seed = 2463534242; 
+    <div class="controls">
+        <h2>検索設定</h2>
+        <label for="gacha-select">ガチャ選択:</label>
+        <select id="gacha-select">
+            <option value="default">ガチャが読み込まれていません</option>
+        </select>
 
-        /**
-         * Xorshift32 の JavaScript 実装
-         */
-        function jsXorshift32() {
-            let x = js_seed;
-            x ^= x << 13;
-            x ^= x >> 17;
-            x ^= x << 5;
-            js_seed = x;
-            return x >>> 0;
+        <label for="start-seed">開始シード値 (1〜4294967295):</label>
+        <input type="text" id="start-seed" value="1">
+
+        <label for="search-range">検索範囲 (件):</label>
+        <input type="text" id="search-range" value="1000000">
+        
+        <label for="worker-count">Worker数 (CPUコア数推奨):</label>
+        <input type="number" id="worker-count" value="4" min="1">
+        
+        <div>
+            <input type="checkbox" id="stop-on-found" checked>
+            <label for="stop-on-found" style="display:inline; font-weight: normal;">最初の結果発見時に検索を停止する</label>
+        </div>
+        
+        <button id="start-button">検索開始</button>
+        <button id="stop-button" style="display:none; background-color:#d9534f;">検索停止</button>
+        <p id="status-message" style="margin-top: 10px; color: #004085; font-weight: bold;">待機中...</p>
+    </div>
+
+    <div class="sequence-inputs">
+        <h2>ターゲットシーケンス入力 (最大16回)</h2>
+        <div class="input-method-toggle">
+            <input type="radio" id="input-select" name="input-method" value="select" checked>
+            <label for="input-select">ドロップダウン入力</label>
+            <input type="radio" id="input-radio" name="input-method" value="radio">
+            <label for="input-radio">ラジオボタン入力</label>
+        </div>
+        <p class="warning">入力した回数分のみがターゲットとして検索されます。未入力の回は無視されます。</p>
+        <table class="sequence-table" id="sequence-table">
+            <thead>
+                <tr>
+                    <th>回数</th>
+                    <th>アイテム名 (レア被り救済処理を考慮)</th>
+                </tr>
+            </thead>
+            <tbody>
+                </tbody>
+        </table>
+    </div>
+
+    <div class="results-container">
+        <h2>検索進捗</h2>
+        <p>処理済みシード: <span id="processed-count">0</span> / <span id="total-range">0</span></p>
+        <p>処理速度: <span id="speed">0</span> SEED/s</p>
+        <div class="progress-bar-container">
+            <div id="progress-bar" class="progress-bar">0%</div>
+        </div>
+
+        <h2>発見されたSEED (<span id="result-count">0</span>件)</h2>
+        <ul class="results-list" id="results-list">
+            </ul>
+    </div>
+</div>
+
+<script>
+    // --- 既存のマスタデータ ---
+    const gachaMaster = {
+        '42': {
+            name: '1.1億DL記念',
+            featuredItemRate: 500, // 目玉アイテム排出率 (5.00%)
+            // 重要な修正: レアリティR4の排出率を0ではなく、マスタデータとして定義する
+            rarityRates: { '0': 1000, '1': 5000, '2': 3000, '3': 1000, '4': 0 }, // 個別排出率 (合計10000)
+            pool: [0, 2, 3, 4, 5, 10, 11, 12, 14, 375, 381, 689] // 全アイテムID
+        },
+        '44': {
+            name: 'ハロウィン',
+            featuredItemRate: 500,
+            rarityRates: { '0': 2000, '1': 4900, '2': 3000, '3': 0, '4': 100 },
+            pool: [0, 2, 3, 4, 5, 10, 11, 12, 14, 18]
         }
+    };
+    
+    const itemMaster = {
+        0: { name: "スピダ", rarity: 1 }, 2: { name: "ネコボン", rarity: 2 }, 3: { name: "ニャンピュ", rarity: 1 },
+        4: { name: "おかめ", rarity: 2 }, 5: { name: "スニャ", rarity: 2 }, 10: { name: "5千XP", rarity: 0 },
+        11: { name: "1万XP", rarity: 1 }, 12: { name: "3万XP", rarity: 1 }, 14: { name: "10万XP", rarity: 2 },
+        18: { name: "200万XP", rarity: 4 }, // レアリティ4 (R4)
+        375: { name: "記念ネコ", rarity: 3 }, 381: { name: "ねこ農家", rarity: 3 }, 689: { name: "石の上にも10年ネコ", rarity: 3 },
+        "-1": { name: "目玉アイテム", rarity: -1 },
+        "999": { name: "無視/未設定", rarity: 999 }
+    };
 
-        async function runWasm() {
-            try {
-                // Wasmモジュールのロードと初期化
-                await init();
+    // --- グローバル変数と定数 ---
+    const NUM_ROLLS = 16;
+    const INPUT_METHOD_SELECT = 'select';
+    const INPUT_METHOD_RADIO = 'radio';
+    const IGNORE_ITEM_ID = 999;
+    
+    // 検索状態
+    let workerPool = [];
+    let isSearching = false;
+    let startTime = 0;
+    let totalProcessedCount = 0;
+    
+    // --- IDと名前の相互マップ ---
+    const ITEM_ID_TO_NAME = {};
+    const ITEM_NAME_TO_ID = {};
+    for (const idStr in itemMaster) {
+        const id = Number(idStr);
+        ITEM_ID_TO_NAME[id] = itemMaster[idStr].name;
+        ITEM_NAME_TO_ID[itemMaster[idStr].name] = id;
+    }
 
-                // 実行回数を定義 (1000万回)
-                const ITERATIONS = 10_000_000;
-                
-                // --- 旧 add 関数の確認（動作確認用） ---
-                const add_result = add(10, 5);
-                console.log(`Rust Wasmでの計算 (add): 10 + 5 = ${add_result}`);
+    // --- Helper Functions (UI/State) ---
 
+    function populateSequenceInputs() {
+        const tableBody = document.getElementById('sequence-table').querySelector('tbody');
+        const inputMethodElement = document.querySelector('input[name="input-method"]:checked');
+        const inputMethod = inputMethodElement ? inputMethodElement.value : INPUT_METHOD_SELECT;
+        
+        // 既存の選択状態を保存
+        const currentSelections = getCurrentTargetSelections(inputMethod);
 
-                // --- Wasm/JS 一括乱数生成ベンチマーク ---
-                console.log(`\n--- Wasm/JS 一括乱数生成ベンチマーク (${ITERATIONS.toLocaleString()}回) ---`);
-
-                // A. Wasm版の計測 (一括処理)
-                console.time('Wasm Bulk Time');
-                // 1000万回の処理を一度の関数呼び出しで実行
-                const wasm_results = generate_xorshift32_bulk(ITERATIONS); 
-                console.timeEnd('Wasm Bulk Time');
-                console.log(`Wasm生成配列サイズ: ${wasm_results.length.toLocaleString()}`);
-
-                // B. JS版の計測 (配列処理)
-                // Wasmから返された最終シードをJSのシードにセット（公平性の確保）
-                js_seed = wasm_results[wasm_results.length - 1]; 
-                
-                console.time('JavaScript Bulk Time');
-                // 配列操作のコストを公平にするため、JSも配列にpushする
-                const js_results = [];
-                for (let i = 0; i < ITERATIONS; i++) {
-                    js_results.push(jsXorshift32());
-                }
-                console.timeEnd('JavaScript Bulk Time');
-                console.log(`JS生成配列サイズ: ${js_results.length.toLocaleString()}`);
-
-                console.log(`\nベンチマーク完了。結果を比較してください。`);
-
-
-            } catch (error) {
-                console.error("WebAssemblyの実行中にエラーが発生しました:", error);
+        tableBody.innerHTML = '';
+        
+        const specialItemNames = [
+            itemMaster[IGNORE_ITEM_ID.toString()].name,
+            itemMaster['-1'].name                       
+        ];
+        
+        let sortableItemNames = [];
+        
+        for (const idStr in itemMaster) {
+            const id = Number(idStr);
+            if (id !== IGNORE_ITEM_ID && id !== -1) {
+                sortableItemNames.push(itemMaster[idStr].name);
             }
         }
+        
+        sortableItemNames.sort();
+        const allItemNames = specialItemNames.concat(sortableItemNames);
 
-        runWasm();
-    </script>
+        for (let i = 1; i <= NUM_ROLLS; i++) {
+            const tr = document.createElement('tr');
+            tr.innerHTML = `<th>${i}回目</th><td></td>`;
+            const td = tr.querySelector('td');
+            
+            const defaultValueName = currentSelections[i] || itemMaster[IGNORE_ITEM_ID.toString()].name;
+            
+            if (inputMethod === INPUT_METHOD_SELECT) {
+                const select = document.createElement('select');
+                select.id = `item-selector-${i}`;
+                select.setAttribute('data-roll', i);
+                select.addEventListener('change', (e) => {
+                    const selectedValue = e.target.value;
+                    if (selectedValue === itemMaster[IGNORE_ITEM_ID.toString()].name) { 
+                        e.target.closest('tr').classList.remove('selected-row');
+                    } else {
+                        e.target.closest('tr').classList.add('selected-row');
+                    }
+                    updateUrl();
+                });
+                
+                allItemNames.forEach(name => {
+                    const option = document.createElement('option');
+                    option.value = name;
+                    option.textContent = name;
+                    select.appendChild(option);
+                });
+                select.value = defaultValueName;
+                td.appendChild(select);
+                
+            } else { // ラジオボタン入力
+                const radioContainer = document.createElement('div');
+                radioContainer.className = 'radio-option-container';
+                radioContainer.id = `radio-container-${i}`;
+                
+                allItemNames.forEach(name => {
+                    const id = ITEM_NAME_TO_ID[name];
+                    const radioId = `radio-${i}-${id}`;
+                    
+                    const label = document.createElement('label');
+                    const isChecked = name === defaultValueName;
+
+                    label.innerHTML = `
+                        <input type="radio" 
+                               name="seeker-roll-${i}" 
+                               id="${radioId}" 
+                               value="${name}"
+                               ${isChecked ? 'checked' : ''}>
+                        ${name}
+                    `;
+                    radioContainer.appendChild(label);
+                });
+                
+                radioContainer.addEventListener('change', (e) => {
+                    const checkedValue = e.target.value;
+                    if (checkedValue === itemMaster[IGNORE_ITEM_ID.toString()].name) {
+                        e.target.closest('tr').classList.remove('selected-row');
+                    } else {
+                        e.target.closest('tr').classList.add('selected-row');
+                    }
+                    updateUrl();
+                });
+                
+                td.appendChild(radioContainer);
+            }
+            
+            // 選択状態に応じて行のスタイルを設定
+            if (defaultValueName !== itemMaster[IGNORE_ITEM_ID.toString()].name) {
+                tr.classList.add('selected-row');
+            }
+            
+            tableBody.appendChild(tr);
+        }
+    }
+    
+    // 現在選択されているターゲットを一時的に取得するヘルパー
+    function getCurrentTargetSelections(inputMethod) {
+        const selections = {};
+        for (let i = 1; i <= NUM_ROLLS; i++) {
+            let itemName;
+            if (inputMethod === INPUT_METHOD_SELECT) {
+                const element = document.getElementById(`item-selector-${i}`);
+                itemName = element ? element.value : null;
+            } else {
+                const radio = document.querySelector(`input[name="seeker-roll-${i}"]:checked`);
+                itemName = radio ? radio.value : null;
+            }
+            if (itemName) {
+                selections[i] = itemName;
+            }
+        }
+        return selections;
+    }
+
+
+    /**
+     * SEED値からガチャを再シミュレーションし、結果文字列を返す (結果デコード用)
+     * (この関数はメインスレッドのUI表示のためだけに使用されます)
+     */
+    function decodeSeedSequence(startSeed, gachaId, sequenceLength) {
+        // worker_seeker.jsのsetupGachaDataとadvanceOneStep_jsをメインスレッド側でコピーし、ここで実行するのが理想ですが、
+        // 今回はシンプルに「SEEDが見つかった」ことだけを示すダミーメッセージとします。
+        return `SEED: ${startSeed} の連鎖結果 (デコードロジックは実装されていません)`;
+    }
+
+    /**
+     * 検索進捗を更新する
+     * @param {number} processed - 今回処理された件数
+     */
+    function updateProgress(processed) {
+        totalProcessedCount += processed;
+        const currentTotalRange = parseInt(document.getElementById('search-range').value);
+        const elapsed = (performance.now() - startTime) / 1000;
+        const speed = elapsed > 0 ? Math.floor(totalProcessedCount / elapsed) : 0;
+        const percentage = Math.min(100, (totalProcessedCount / currentTotalRange) * 100);
+
+        document.getElementById('processed-count').textContent = totalProcessedCount.toLocaleString();
+        document.getElementById('speed').textContent = speed.toLocaleString();
+        document.getElementById('progress-bar').style.width = percentage.toFixed(2) + '%';
+        document.getElementById('progress-bar').textContent = percentage.toFixed(1) + '%';
+    }
+
+    /**
+     * 発見された結果をリストに追加する
+     * @param {number} seed - 発見されたシード値
+     * @param {number} mask - 発見時のマスク値 (完全一致の場合は2^(N)-1)
+     */
+    function addResult(seed, mask) {
+        const resultsList = document.getElementById('results-list');
+        const gachaId = document.getElementById('gacha-select').value;
+        
+        const li = document.createElement('li');
+        const sequenceText = decodeSeedSequence(seed, gachaId, NUM_ROLLS);
+
+        li.innerHTML = `
+            <span class="result-seed">SEED: ${seed}</span>
+            <span class="result-sequence">発見 (マスク: ${mask}): ${sequenceText}</span>
+            <span class="result-time">@ ${(performance.now() - startTime).toFixed(1)}s</span>
+        `;
+        resultsList.prepend(li);
+        
+        const currentResultCount = parseInt(document.getElementById('result-count').textContent.replace(/,/g, ''));
+        document.getElementById('result-count').textContent = (currentResultCount + 1).toLocaleString();
+    }
+
+
+    // --- 検索実行ロジック (executeSearch) ---
+
+    function executeSearch() {
+        if (isSearching) return;
+        
+        const gachaId = document.getElementById('gacha-select').value;
+        const startSeed = parseInt(document.getElementById('start-seed').value);
+        const searchRange = parseInt(document.getElementById('search-range').value);
+        const workerCount = parseInt(document.getElementById('worker-count').value);
+        const stopOnFound = document.getElementById('stop-on-found').checked;
+        
+        // ターゲットシーケンスの取得 (IDに変換)
+        const targetSequence = [];
+        let seqLength = 0;
+        const inputMethod = document.querySelector('input[name="input-method"]:checked').value;
+
+        for (let i = 1; i <= NUM_ROLLS; i++) {
+            let itemName;
+            if (inputMethod === INPUT_METHOD_SELECT) {
+                const element = document.getElementById(`item-selector-${i}`);
+                itemName = element ? element.value : null;
+            } else { // radio
+                // ラジオボタンの選択値を取得 (重要)
+                const radio = document.querySelector(`input[name="seeker-roll-${i}"]:checked`);
+                itemName = radio ? radio.value : null;
+            }
+
+            if (itemName && itemName !== itemMaster[IGNORE_ITEM_ID.toString()].name) { 
+                targetSequence.push(ITEM_NAME_TO_ID[itemName] || 0);
+                seqLength++;
+            } else if (seqLength > 0) {
+                break;
+            }
+        }
+        
+        if (seqLength === 0) {
+            alert('ターゲットシーケンスが入力されていません。');
+            return;
+        }
+
+        // --- 1. 状態リセットとUI更新 ---
+        isSearching = true;
+        totalProcessedCount = 0;
+        startTime = performance.now();
+        document.getElementById('start-button').style.display = 'none';
+        document.getElementById('stop-button').style.display = 'block';
+        document.getElementById('results-list').innerHTML = '';
+        document.getElementById('result-count').textContent = '0';
+        document.getElementById('total-range').textContent = searchRange.toLocaleString();
+        document.getElementById('status-message').textContent = '検索中...';
+        
+        // --- 2. Workerの起動とジョブ割り当て ---
+        workerPool.forEach(w => w.terminate());
+        workerPool = [];
+        
+        const totalSearchRange = searchRange;
+        const rangePerWorker = Math.floor(totalSearchRange / workerCount);
+        let currentSeed = startSeed;
+        
+        const rawGachaData = gachaMaster[gachaId]; 
+        
+        for (let i = 0; i < workerCount; i++) {
+            const countForWorker = (i === workerCount - 1) 
+                ? totalSearchRange - (rangePerWorker * i) 
+                : rangePerWorker;
+            
+            if (countForWorker <= 0) continue;
+
+            const worker = new Worker('seeker_worker.js');
+            workerPool.push(worker);
+            
+            worker.postMessage({
+                type: 'search',
+                workerIndex: i,
+                initialStartSeed: currentSeed,
+                count: countForWorker,
+                targetSequence: targetSequence, 
+                stopOnFound: stopOnFound,
+                
+                // データコピーでWorkerに送信
+                gachaData: rawGachaData,
+                itemMaster: itemMaster
+            });
+
+            currentSeed = (currentSeed + countForWorker) >>> 0; 
+            
+            worker.onmessage = handleWorkerMessage;
+            worker.onerror = handleWorkerError;
+        }
+    }
+    
+    // --- メッセージハンドラ/停止ロジック ---
+
+    function handleWorkerMessage(e) {
+        const data = e.data;
+        const worker = this;
+        
+        if (data.type === 'progress') {
+            updateProgress(data.processed);
+            
+        } else if (data.type === 'result') {
+            addResult(data.seed, data.mask);
+            
+            // 最初の結果発見時に停止する場合、他のWorkerも停止させる
+            if (document.getElementById('stop-on-found').checked) {
+                stopSearch('found');
+            }
+            
+        } else if (data.type === 'done' || data.type === 'interrupted' || data.type === 'error') {
+            
+            // 最後の進捗を更新
+            updateProgress(data.processed || 0);
+            
+            const index = workerPool.indexOf(worker);
+            if (index > -1) {
+                workerPool.splice(index, 1);
+            }
+            worker.terminate();
+
+            if (data.type === 'error') {
+                document.getElementById('status-message').textContent = `エラー: Worker ${data.workerIndex}で予期せぬエラーが発生しました。`;
+            }
+
+            // 全てのWorkerが終了したら検索完了
+            if (workerPool.length === 0) {
+                stopSearch(data.type === 'error' ? 'error' : 'completed');
+            }
+        }
+    }
+    
+    function handleWorkerError(e) {
+        document.getElementById('status-message').textContent = `エラー: Workerでエラー (${e.message})。`;
+        
+        const worker = this;
+        const index = workerPool.indexOf(worker);
+        if (index > -1) workerPool.splice(index, 1);
+        worker.terminate();
+        
+        if (workerPool.length === 0) stopSearch('error');
+    }
+
+    function stopSearch(reason) {
+        if (!isSearching) return;
+        
+        isSearching = false;
+        
+        // 全てのWorkerを強制終了
+        workerPool.forEach(w => w.terminate());
+        workerPool = [];
+        
+        document.getElementById('start-button').style.display = 'block';
+        document.getElementById('stop-button').style.display = 'none';
+        
+        let status = '完了';
+        const elapsedTime = ((performance.now() - startTime) / 1000).toFixed(2); // 経過時間
+        
+        if (reason === 'found') {
+            status = `SEEDを発見し、停止しました。 (時間: ${elapsedTime}秒)`;
+        } else if (reason === 'interrupted') {
+            status = `ユーザーによって中断されました。 (時間: ${elapsedTime}秒)`;
+        } else if (reason === 'error') {
+            status = `エラーにより中断されました。 (時間: ${elapsedTime}秒)`;
+        } else if (reason === 'completed') {
+             status = `全範囲の検索が完了しました。 (時間: ${elapsedTime}秒)`;
+        }
+        
+        const totalRange = parseInt(document.getElementById('search-range').value);
+        document.getElementById('status-message').textContent = `${status} (処理率: ${((totalProcessedCount / totalRange) * 100).toFixed(2)}%)`;
+        
+        // 最終的な進捗表示を確実にする
+        updateProgress(0);
+        updateUrl(); 
+    }
+    
+    // ... (URL関連の関数を修正)
+    function updateUrl() {
+        if (!isSearching) {
+            const params = new URLSearchParams();
+            
+            params.set('g', document.getElementById('gacha-select').value);
+            params.set('s', document.getElementById('start-seed').value);
+            params.set('r', document.getElementById('search-range').value);
+            params.set('w', document.getElementById('worker-count').value);
+            
+            const inputMethod = document.querySelector('input[name="input-method"]:checked').value;
+            params.set('m', inputMethod);
+
+            const targetIds = [];
+            for (let i = 1; i <= NUM_ROLLS; i++) {
+                let itemName;
+                if (inputMethod === INPUT_METHOD_SELECT) {
+                    const element = document.getElementById(`item-selector-${i}`);
+                    itemName = element ? element.value : null;
+                } else {
+                    // ラジオボタンの選択値を取得 (重要)
+                    const radio = document.querySelector(`input[name="seeker-roll-${i}"]:checked`);
+                    itemName = radio ? radio.value : null;
+                }
+
+                const itemId = ITEM_NAME_TO_ID[itemName];
+                if (itemId !== IGNORE_ITEM_ID && itemId !== undefined) { 
+                    targetIds.push(itemId);
+                } else if (targetIds.length > 0) {
+                    break;
+                }
+            }
+            
+            if (targetIds.length > 0) {
+                params.set('t', targetIds.join('-'));
+            } else {
+                params.delete('t');
+            }
+
+            const newUrl = `${window.location.pathname}?${params.toString()}${window.location.hash}`;
+            window.history.replaceState(null, '', newUrl);
+        }
+    }
+    
+    function loadFromUrl() {
+        const params = new URLSearchParams(window.location.search);
+        
+        // 1. ガチャ選択 (g)
+        const gachaId = params.get('g');
+        const gachaSelect = document.getElementById('gacha-select');
+        if (gachaId && gachaSelect.querySelector(`option[value="${gachaId}"]`)) {
+            gachaSelect.value = gachaId;
+        }
+
+        // 3. 入力方法 (m) のロード
+        const urlInputMethod = params.get('m');
+        let currentInputMethod = INPUT_METHOD_SELECT;
+        if (urlInputMethod) {
+            const radio = document.getElementById(`input-${urlInputMethod}`);
+            if (radio) {
+                radio.checked = true;
+                currentInputMethod = urlInputMethod;
+            }
+        }
+        
+        // 入力フォームを生成し、デフォルトで'無視/未設定'が選ばれた状態にする
+        populateSequenceInputs(); 
+
+        // 4. ターゲットシーケンス (t) のロード
+        const targetSequence = params.get('t');
+        if (targetSequence) {
+            const targetIds = targetSequence.split('-').map(id => {
+                const numId = Number(id);
+                return ITEM_ID_TO_NAME[numId] ? numId : null;
+            }).filter(id => id !== null);
+
+            targetIds.forEach((idOrSpecial, index) => {
+                const itemName = ITEM_ID_TO_NAME[idOrSpecial];
+                
+                if (itemName) {
+                    const rollNum = index + 1;
+                    if (currentInputMethod === INPUT_METHOD_SELECT) {
+                        const selectElement = document.getElementById(`item-selector-${rollNum}`);
+                        if (selectElement) { 
+                            const optionExists = Array.from(selectElement.options).some(option => option.value === itemName);
+                            if(optionExists) {
+                                selectElement.value = itemName;
+                                selectElement.closest('tr').classList.add('selected-row'); 
+                            }
+                        }
+                    } else { // radio
+                        // ラジオボタンをセット (重要)
+                        const radio = document.querySelector(`input[name="seeker-roll-${rollNum}"][value="${itemName}"]`);
+                        if (radio) {
+                            radio.checked = true;
+                            radio.closest('tr').classList.add('selected-row'); 
+                        }
+                    }
+                }
+            });
+        }
+        
+        // 2. 検索設定 (s, r, w)
+        const startSeedInput = document.getElementById('start-seed');
+        if (params.get('s')) startSeedInput.value = params.get('s');
+        
+        const searchRangeInput = document.getElementById('search-range');
+        if (params.get('r')) searchRangeInput.value = params.get('r');
+        
+        const workerCountInput = document.getElementById('worker-count');
+        if (params.get('w')) workerCountInput.value = params.get('w');
+        
+        updateUrl();
+    }
+    
+    document.getElementById('start-button').addEventListener('click', executeSearch);
+    document.getElementById('stop-button').addEventListener('click', () => stopSearch('interrupted'));
+
+    document.addEventListener('DOMContentLoaded', () => {
+        const gachaSelect = document.getElementById('gacha-select');
+        gachaSelect.innerHTML = '';
+        for (const id in gachaMaster) {
+            const option = document.createElement('option');
+            option.value = id;
+            option.textContent = gachaMaster[id].name;
+            gachaSelect.appendChild(option);
+        }
+        
+        // DOMContentLoaded時に一度だけloadFromUrlを呼び出す
+        loadFromUrl(); 
+        
+        document.getElementById('gacha-select').addEventListener('change', () => {
+            // ガチャが変わったら入力フォームを再生成
+            populateSequenceInputs(); 
+            updateUrl();
+        });
+        document.getElementById('start-seed').addEventListener('input', updateUrl);
+        document.getElementById('search-range').addEventListener('input', updateUrl);
+        document.getElementById('worker-count').addEventListener('input', updateUrl);
+        
+        document.querySelectorAll('input[name="input-method"]').forEach(radio => {
+            radio.addEventListener('change', () => {
+                // 入力方法が変わったら入力フォームを再生成
+                populateSequenceInputs(); 
+                updateUrl();
+            });
+        });
+    });
+
+</script>
 </body>
 </html>
