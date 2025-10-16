@@ -3,7 +3,9 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>イベントガチャ SEEDシーカー (標準版)</title>
+    <title>イベントガチャ SEEDシーカー (SAB高速版)</title>
+    <meta http-equiv="Cross-Origin-Opener-Policy" content="same-origin">
+    <meta http-equiv="Cross-Origin-Embedder-Policy" content="require-corp">
     <style>
         /* (CSSスタイルは省略せずに維持) */
         body {
@@ -174,7 +176,7 @@
             display: flex;
             flex-wrap: wrap;
             gap: 5px 10px;
-            max-height: 100px; /* 縦幅を制限してスクロール */
+            max-height: 100px;
             overflow-y: auto;
             border: 1px solid #eee;
             padding: 5px;
@@ -194,7 +196,12 @@
 <body>
 
 <div class="container">
-    <h1>イベントガチャ SEEDシーカー (標準版)</h1>
+    <h1>イベントガチャ SEEDシーカー (SAB高速版)</h1>
+
+    <div id="sab-warning" class="warning" style="display:none;">
+        **エラー:** SharedArrayBufferが利用できません。サーバーがクロスオリジン分離（COOP/COEPヘッダ）を送信していません。
+        ローカルで実行する場合は `npx http-server --coop --coep` を使用してください。
+    </div>
 
     <div class="controls">
         <h2>検索設定</h2>
@@ -263,7 +270,6 @@
         '42': {
             name: '1.1億DL記念',
             featuredItemRate: 500, // 目玉アイテム排出率 (5.00%)
-            // 重要な修正: レアリティR4の排出率を0ではなく、マスタデータとして定義する
             rarityRates: { '0': 1000, '1': 5000, '2': 3000, '3': 1000, '4': 0 }, // 個別排出率 (合計10000)
             pool: [0, 2, 3, 4, 5, 10, 11, 12, 14, 375, 381, 689] // 全アイテムID
         },
@@ -279,23 +285,39 @@
         0: { name: "スピダ", rarity: 1 }, 2: { name: "ネコボン", rarity: 2 }, 3: { name: "ニャンピュ", rarity: 1 },
         4: { name: "おかめ", rarity: 2 }, 5: { name: "スニャ", rarity: 2 }, 10: { name: "5千XP", rarity: 0 },
         11: { name: "1万XP", rarity: 1 }, 12: { name: "3万XP", rarity: 1 }, 14: { name: "10万XP", rarity: 2 },
-        18: { name: "200万XP", rarity: 4 }, // レアリティ4 (R4)
+        18: { name: "200万XP", rarity: 4 },
         375: { name: "記念ネコ", rarity: 3 }, 381: { name: "ねこ農家", rarity: 3 }, 689: { name: "石の上にも10年ネコ", rarity: 3 },
         "-1": { name: "目玉アイテム", rarity: -1 },
         "999": { name: "無視/未設定", rarity: 999 }
     };
 
-    // --- グローバル変数と定数 ---
+    // --- SAB 共有メモリ定数 ---
+    const MAX_RESULTS = 5000;
+    const SAB_CONFIG = {
+        SAB_RESULT_COUNT: 0, // 結果バッファ: 結果数カウンタ (Index 0)
+        SAB_PROGRESS_PROCESSED: 0, // 進捗バッファ: 処理済みシード数カウンタ (Index 0)
+        SAB_STOP_FLAG: 0, // 停止バッファ: 停止フラグ (Index 0)
+        
+        // マスターデータバッファ内のオフセット (Uint32単位)
+        MASTER_H_GACHA_START_OFFSET: 0, // Gacha Rate情報開始 (長さ5)
+        MASTER_H_RARITY_POOL_START: 5, // Rarity Poolメタデータ開始 (RarityID, Length, Offset) * 5レアリティ = 長さ15
+        MASTER_D_ITEM_POOL_START: 20 // アイテムID配列のデータ開始
+    };
+    
+    // --- グローバル変数 ---
     const NUM_ROLLS = 16;
     const INPUT_METHOD_SELECT = 'select';
     const INPUT_METHOD_RADIO = 'radio';
     const IGNORE_ITEM_ID = 999;
     
-    // 検索状態
     let workerPool = [];
     let isSearching = false;
     let startTime = 0;
     let totalProcessedCount = 0;
+    let progressTimer = null;
+    let resultView; // Uint32Array view for results
+    let progressView; // Uint32Array view for progress
+    let stopView; // Uint32Array view for stop flag
     
     // --- IDと名前の相互マップ ---
     const ITEM_ID_TO_NAME = {};
@@ -309,11 +331,11 @@
     // --- Helper Functions (UI/State) ---
 
     function populateSequenceInputs() {
+        // ... (前のコードと同じロジックを維持)
         const tableBody = document.getElementById('sequence-table').querySelector('tbody');
         const inputMethodElement = document.querySelector('input[name="input-method"]:checked');
         const inputMethod = inputMethodElement ? inputMethodElement.value : INPUT_METHOD_SELECT;
         
-        // 既存の選択状態を保存
         const currentSelections = getCurrentTargetSelections(inputMethod);
 
         tableBody.innerHTML = '';
@@ -365,7 +387,7 @@
                 select.value = defaultValueName;
                 td.appendChild(select);
                 
-            } else { // ラジオボタン入力
+            } else { 
                 const radioContainer = document.createElement('div');
                 radioContainer.className = 'radio-option-container';
                 radioContainer.id = `radio-container-${i}`;
@@ -401,7 +423,6 @@
                 td.appendChild(radioContainer);
             }
             
-            // 選択状態に応じて行のスタイルを設定
             if (defaultValueName !== itemMaster[IGNORE_ITEM_ID.toString()].name) {
                 tr.classList.add('selected-row');
             }
@@ -410,7 +431,6 @@
         }
     }
     
-    // 現在選択されているターゲットを一時的に取得するヘルパー
     function getCurrentTargetSelections(inputMethod) {
         const selections = {};
         for (let i = 1; i <= NUM_ROLLS; i++) {
@@ -429,45 +449,63 @@
         return selections;
     }
 
-
     /**
-     * SEED値からガチャを再シミュレーションし、結果文字列を返す (結果デコード用)
-     * (この関数はメインスレッドのUI表示のためだけに使用されます)
+     * SABバッファから結果をポーリングしてUIに追加する
      */
-    function decodeSeedSequence(startSeed, gachaId, sequenceLength) {
-        // worker_seeker.jsのsetupGachaDataとadvanceOneStep_jsをメインスレッド側でコピーし、ここで実行するのが理想ですが、
-        // 今回はシンプルに「SEEDが見つかった」ことだけを示すダミーメッセージとします。
-        return `SEED: ${startSeed} の連鎖結果 (デコードロジックは実装されていません)`;
+    let lastResultCount = 0;
+    function pollResults() {
+        const currentResultCount = Atomics.load(resultView, SAB_CONFIG.SAB_RESULT_COUNT);
+        
+        while (lastResultCount < currentResultCount) {
+            const readOffset = 1 + (lastResultCount * 2);
+            const seed = Atomics.load(resultView, readOffset);
+            const mask = Atomics.load(resultView, readOffset + 1);
+            addResult(seed, mask);
+            lastResultCount++;
+        }
     }
-
+    
     /**
-     * 検索進捗を更新する
-     * @param {number} processed - 今回処理された件数
+     * SABバッファから進捗をポーリングしてUIを更新する
      */
-    function updateProgress(processed) {
-        totalProcessedCount += processed;
-        const currentTotalRange = parseInt(document.getElementById('search-range').value);
+    function pollProgress() {
+        const totalRange = parseInt(document.getElementById('search-range').value);
+        
+        // 1. 進捗の読み取りと更新
+        const currentProcessedCount = Atomics.load(progressView, SAB_CONFIG.SAB_PROGRESS_PROCESSED);
+        
+        const processedDelta = currentProcessedCount - totalProcessedCount;
+        totalProcessedCount = currentProcessedCount;
+
         const elapsed = (performance.now() - startTime) / 1000;
         const speed = elapsed > 0 ? Math.floor(totalProcessedCount / elapsed) : 0;
-        const percentage = Math.min(100, (totalProcessedCount / currentTotalRange) * 100);
+        const percentage = Math.min(100, (totalProcessedCount / totalRange) * 100);
 
         document.getElementById('processed-count').textContent = totalProcessedCount.toLocaleString();
         document.getElementById('speed').textContent = speed.toLocaleString();
         document.getElementById('progress-bar').style.width = percentage.toFixed(2) + '%';
         document.getElementById('progress-bar').textContent = percentage.toFixed(1) + '%';
+        
+        // 2. 結果のポーリング
+        pollResults();
+
+        // 3. 停止フラグのチェック
+        if (stopView[SAB_CONFIG.SAB_STOP_FLAG] === 1) {
+            // Worker側のフラグが立ったら停止処理へ
+            stopSearch('found'); 
+        } else if (totalProcessedCount >= totalRange && workerPool.length === 0) {
+             // Workerが全て終了し、全件処理が完了した場合
+             stopSearch('completed');
+        }
     }
 
-    /**
-     * 発見された結果をリストに追加する
-     * @param {number} seed - 発見されたシード値
-     * @param {number} mask - 発見時のマスク値 (完全一致の場合は2^(N)-1)
-     */
     function addResult(seed, mask) {
         const resultsList = document.getElementById('results-list');
         const gachaId = document.getElementById('gacha-select').value;
         
         const li = document.createElement('li');
-        const sequenceText = decodeSeedSequence(seed, gachaId, NUM_ROLLS);
+        // SEEDデコードは複雑なので、結果が出たことのみを表示
+        const sequenceText = `SEED: ${seed} の連鎖結果`;
 
         li.innerHTML = `
             <span class="result-seed">SEED: ${seed}</span>
@@ -479,6 +517,66 @@
         const currentResultCount = parseInt(document.getElementById('result-count').textContent.replace(/,/g, ''));
         document.getElementById('result-count').textContent = (currentResultCount + 1).toLocaleString();
     }
+    
+    /**
+     * ガチャマスタデータをSABにパッキングする
+     */
+    function packMasterData(gachaId) {
+        const rawGacha = gachaMaster[gachaId];
+        
+        // 1. レアリティプールにアイテムを分類
+        const rarityItems = { '0': [], '1': [], '2': [], '3': [], '4': [] };
+        rawGacha.pool.forEach(itemId => {
+            const itemInfo = itemMaster[itemId.toString()];
+            if (itemInfo && itemInfo.rarity !== undefined && itemInfo.rarity >= 0 && itemInfo.rarity <= 4) {
+                rarityItems[itemInfo.rarity.toString()].push(itemId);
+            }
+        });
+
+        // 2. データサイズを計算
+        let totalItemCount = 0;
+        for (let i = 0; i <= 4; i++) {
+            totalItemCount += rarityItems[i.toString()].length;
+        }
+        
+        // ヘッダ (20) + アイテムデータ
+        const totalSize = SAB_CONFIG.MASTER_D_ITEM_POOL_START + totalItemCount; 
+        
+        // 3. SABを確保
+        const masterSab = new SharedArrayBuffer(totalSize * 4); // Uint32 * 4 bytes
+        const masterView = new Uint32Array(masterSab);
+        
+        // 4. Gacha Rate情報 (Header 0-4)
+        // 累積排出率を計算し、SABに格納
+        masterView[SAB_CONFIG.MASTER_H_GACHA_START_OFFSET + 0] = rawGacha.featuredItemRate;
+        let cumulativeSum = 0;
+        for (let i = 0; i <= 4; i++) {
+            cumulativeSum += rawGacha.rarityRates[i.toString()] || 0;
+            masterView[SAB_CONFIG.MASTER_H_GACHA_START_OFFSET + 1 + i] = cumulativeSum;
+        }
+        // R4の累積確率は常に10000が入る (Index 5)
+        
+        // 5. Rarity Poolメタデータ (Header 5-19)
+        let dataOffset = SAB_CONFIG.MASTER_D_ITEM_POOL_START;
+        for (let i = 0; i <= 4; i++) {
+            const rarityId = i;
+            const pool = rarityItems[rarityId.toString()];
+            const length = pool.length;
+            
+            const metadataPtr = SAB_CONFIG.MASTER_H_RARITY_POOL_START + (i * 3);
+            masterView[metadataPtr] = rarityId;       // Index + 0: Rarity ID
+            masterView[metadataPtr + 1] = length;     // Index + 1: Length
+            masterView[metadataPtr + 2] = dataOffset; // Index + 2: Data Offset (Item ID data start)
+            
+            // 6. アイテムIDデータを格納
+            for (let k = 0; k < length; k++) {
+                masterView[dataOffset + k] = pool[k];
+            }
+            dataOffset += length;
+        }
+        
+        return masterSab;
+    }
 
 
     // --- 検索実行ロジック (executeSearch) ---
@@ -486,6 +584,11 @@
     function executeSearch() {
         if (isSearching) return;
         
+        if (typeof SharedArrayBuffer === 'undefined') {
+            document.getElementById('sab-warning').style.display = 'block';
+            return;
+        }
+
         const gachaId = document.getElementById('gacha-select').value;
         const startSeed = parseInt(document.getElementById('start-seed').value);
         const searchRange = parseInt(document.getElementById('search-range').value);
@@ -502,8 +605,7 @@
             if (inputMethod === INPUT_METHOD_SELECT) {
                 const element = document.getElementById(`item-selector-${i}`);
                 itemName = element ? element.value : null;
-            } else { // radio
-                // ラジオボタンの選択値を取得 (重要)
+            } else { 
                 const radio = document.querySelector(`input[name="seeker-roll-${i}"]:checked`);
                 itemName = radio ? radio.value : null;
             }
@@ -521,9 +623,25 @@
             return;
         }
 
-        // --- 1. 状態リセットとUI更新 ---
+        // --- 1. 共有メモリの初期化 ---
+        const resultSab = new SharedArrayBuffer((1 + MAX_RESULTS * 2) * 4); // 1 (Count) + 5000 * 2 (Seed, Mask)
+        const progressSab = new SharedArrayBuffer(1 * 4); // 1 (Processed Count)
+        const stopSab = new SharedArrayBuffer(1 * 4); // 1 (Stop Flag)
+        const masterSab = packMasterData(gachaId);
+
+        resultView = new Uint32Array(resultSab);
+        progressView = new Uint32Array(progressSab);
+        stopView = new Uint32Array(stopSab);
+        
+        // カウンタを0に初期化
+        Atomics.store(resultView, SAB_CONFIG.SAB_RESULT_COUNT, 0);
+        Atomics.store(progressView, SAB_CONFIG.SAB_PROGRESS_PROCESSED, 0);
+        Atomics.store(stopView, SAB_CONFIG.SAB_STOP_FLAG, 0);
+
+        // --- 2. 状態リセットとUI更新 ---
         isSearching = true;
         totalProcessedCount = 0;
+        lastResultCount = 0;
         startTime = performance.now();
         document.getElementById('start-button').style.display = 'none';
         document.getElementById('stop-button').style.display = 'block';
@@ -532,15 +650,17 @@
         document.getElementById('total-range').textContent = searchRange.toLocaleString();
         document.getElementById('status-message').textContent = '検索中...';
         
-        // --- 2. Workerの起動とジョブ割り当て ---
+        // 進捗ポーリング開始
+        if (progressTimer) clearInterval(progressTimer);
+        progressTimer = setInterval(pollProgress, 100); 
+
+        // --- 3. Workerの起動とジョブ割り当て ---
         workerPool.forEach(w => w.terminate());
         workerPool = [];
         
         const totalSearchRange = searchRange;
         const rangePerWorker = Math.floor(totalSearchRange / workerCount);
         let currentSeed = startSeed;
-        
-        const rawGachaData = gachaMaster[gachaId]; 
         
         for (let i = 0; i < workerCount; i++) {
             const countForWorker = (i === workerCount - 1) 
@@ -559,40 +679,31 @@
                 count: countForWorker,
                 targetSequence: targetSequence, 
                 stopOnFound: stopOnFound,
+                seekerConfig: SAB_CONFIG,
                 
-                // データコピーでWorkerに送信
-                gachaData: rawGachaData,
-                itemMaster: itemMaster
+                // SharedArrayBufferを渡す (Workerとの間でポインタを共有)
+                resultSab,
+                progressSab,
+                stopSab,
+                masterDataSab: masterSab
             });
 
             currentSeed = (currentSeed + countForWorker) >>> 0; 
             
+            // Worker側のエラーハンドリングは引き続き使用
             worker.onmessage = handleWorkerMessage;
             worker.onerror = handleWorkerError;
         }
     }
     
-    // --- メッセージハンドラ/停止ロジック ---
+    // --- メッセージハンドラ/停止ロジック (SAB版ではWorkerメッセージは主にエラーと完了報告用) ---
 
     function handleWorkerMessage(e) {
         const data = e.data;
         const worker = this;
         
-        if (data.type === 'progress') {
-            updateProgress(data.processed);
-            
-        } else if (data.type === 'result') {
-            addResult(data.seed, data.mask);
-            
-            // 最初の結果発見時に停止する場合、他のWorkerも停止させる
-            if (document.getElementById('stop-on-found').checked) {
-                stopSearch('found');
-            }
-            
-        } else if (data.type === 'done' || data.type === 'interrupted' || data.type === 'error') {
-            
-            // 最後の進捗を更新
-            updateProgress(data.processed || 0);
+        if (data.type === 'done' || data.type === 'interrupted' || data.type === 'error') {
+            // Workerが完了メッセージを送ってきたら、Workerプールから削除
             
             const index = workerPool.indexOf(worker);
             if (index > -1) {
@@ -601,12 +712,15 @@
             worker.terminate();
 
             if (data.type === 'error') {
-                document.getElementById('status-message').textContent = `エラー: Worker ${data.workerIndex}で予期せぬエラーが発生しました。`;
+                // エラーが発生したら、全 Worker を停止する
+                stopSearch('error');
             }
-
-            // 全てのWorkerが終了したら検索完了
+            
+            // Workerが全て終了したら、最終チェックと終了処理
             if (workerPool.length === 0) {
-                stopSearch(data.type === 'error' ? 'error' : 'completed');
+                 // 最終的な進捗と結果をポーリング
+                pollProgress();
+                stopSearch('completed'); 
             }
         }
     }
@@ -619,15 +733,20 @@
         if (index > -1) workerPool.splice(index, 1);
         worker.terminate();
         
-        if (workerPool.length === 0) stopSearch('error');
+        stopSearch('error');
     }
 
     function stopSearch(reason) {
         if (!isSearching) return;
         
+        // 検索を停止する
         isSearching = false;
+        clearInterval(progressTimer); 
         
-        // 全てのWorkerを強制終了
+        // 停止フラグをセットし、Workerが自発的に終了するように促す
+        Atomics.store(stopView, SAB_CONFIG.SAB_STOP_FLAG, 1);
+        
+        // 残りのWorkerを強制終了
         workerPool.forEach(w => w.terminate());
         workerPool = [];
         
@@ -635,7 +754,7 @@
         document.getElementById('stop-button').style.display = 'none';
         
         let status = '完了';
-        const elapsedTime = ((performance.now() - startTime) / 1000).toFixed(2); // 経過時間
+        const elapsedTime = ((performance.now() - startTime) / 1000).toFixed(2);
         
         if (reason === 'found') {
             status = `SEEDを発見し、停止しました。 (時間: ${elapsedTime}秒)`;
@@ -650,12 +769,10 @@
         const totalRange = parseInt(document.getElementById('search-range').value);
         document.getElementById('status-message').textContent = `${status} (処理率: ${((totalProcessedCount / totalRange) * 100).toFixed(2)}%)`;
         
-        // 最終的な進捗表示を確実にする
-        updateProgress(0);
         updateUrl(); 
     }
     
-    // ... (URL関連の関数を修正)
+    // ... (URL関連の関数は前コードと同じロジックを維持)
     function updateUrl() {
         if (!isSearching) {
             const params = new URLSearchParams();
@@ -675,7 +792,6 @@
                     const element = document.getElementById(`item-selector-${i}`);
                     itemName = element ? element.value : null;
                 } else {
-                    // ラジオボタンの選択値を取得 (重要)
                     const radio = document.querySelector(`input[name="seeker-roll-${i}"]:checked`);
                     itemName = radio ? radio.value : null;
                 }
@@ -702,14 +818,12 @@
     function loadFromUrl() {
         const params = new URLSearchParams(window.location.search);
         
-        // 1. ガチャ選択 (g)
         const gachaId = params.get('g');
         const gachaSelect = document.getElementById('gacha-select');
         if (gachaId && gachaSelect.querySelector(`option[value="${gachaId}"]`)) {
             gachaSelect.value = gachaId;
         }
 
-        // 3. 入力方法 (m) のロード
         const urlInputMethod = params.get('m');
         let currentInputMethod = INPUT_METHOD_SELECT;
         if (urlInputMethod) {
@@ -720,10 +834,8 @@
             }
         }
         
-        // 入力フォームを生成し、デフォルトで'無視/未設定'が選ばれた状態にする
         populateSequenceInputs(); 
 
-        // 4. ターゲットシーケンス (t) のロード
         const targetSequence = params.get('t');
         if (targetSequence) {
             const targetIds = targetSequence.split('-').map(id => {
@@ -746,7 +858,6 @@
                             }
                         }
                     } else { // radio
-                        // ラジオボタンをセット (重要)
                         const radio = document.querySelector(`input[name="seeker-roll-${rollNum}"][value="${itemName}"]`);
                         if (radio) {
                             radio.checked = true;
@@ -757,7 +868,6 @@
             });
         }
         
-        // 2. 検索設定 (s, r, w)
         const startSeedInput = document.getElementById('start-seed');
         if (params.get('s')) startSeedInput.value = params.get('s');
         
@@ -771,9 +881,15 @@
     }
     
     document.getElementById('start-button').addEventListener('click', executeSearch);
-    document.getElementById('stop-button').addEventListener('click', () => stopSearch('interrupted'));
+    document.getElementById('stop-button').addEventListener('click', () => {
+        stopSearch('interrupted');
+    });
 
     document.addEventListener('DOMContentLoaded', () => {
+        if (typeof SharedArrayBuffer === 'undefined') {
+            document.getElementById('sab-warning').style.display = 'block';
+        }
+
         const gachaSelect = document.getElementById('gacha-select');
         gachaSelect.innerHTML = '';
         for (const id in gachaMaster) {
@@ -783,11 +899,9 @@
             gachaSelect.appendChild(option);
         }
         
-        // DOMContentLoaded時に一度だけloadFromUrlを呼び出す
         loadFromUrl(); 
         
         document.getElementById('gacha-select').addEventListener('change', () => {
-            // ガチャが変わったら入力フォームを再生成
             populateSequenceInputs(); 
             updateUrl();
         });
@@ -797,7 +911,6 @@
         
         document.querySelectorAll('input[name="input-method"]').forEach(radio => {
             radio.addEventListener('change', () => {
-                // 入力方法が変わったら入力フォームを再生成
                 populateSequenceInputs(); 
                 updateUrl();
             });
