@@ -267,17 +267,27 @@
 <script>
     if ('serviceWorker' in navigator) {
         // Service Workerを登録
-        navigator.serviceWorker.register('./sw.js')
+        // 💡 修正ポイント: GitHub Pagesのプロジェクト名をパスに含める
+        // 今回のURL https://tdlstdls.github.io/test_e_seeker/ から '/test_e_seeker/' を取得
+        const pathSegments = window.location.pathname.split('/').filter(p => p.length > 0);
+        const repoName = pathSegments[0];
+        
+        // 登録するService Workerの絶対パス: /test_e_seeker/sw.js
+        const swPath = `/${repoName}/sw.js`; 
+        
+        // もしリポジトリ名が取得できなければ、/sw.js（ユーザーページ用）にフォールバック
+        const finalPath = repoName ? swPath : '/sw.js';
+
+        // 登録実行
+        navigator.serviceWorker.register(finalPath)
             .then(registration => {
                 console.log('Service Worker 登録成功:', registration);
             })
             .catch(error => {
                 console.error('Service Worker 登録失敗:', error);
-                // 失敗した場合はSABが使えない旨を警告
                 document.getElementById('sab-warning').style.display = 'block';
             });
     } else {
-        // Service Workerがサポートされていない場合の警告
         document.getElementById('sab-warning').style.display = 'block';
     }
 </script>
@@ -938,4 +948,5 @@
 </script>
 </body>
 </html>
+
 
